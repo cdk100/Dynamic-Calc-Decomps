@@ -82,6 +82,21 @@ describe('Team and doubles planner', () => {
     cy.get('[data-action-slot="player-left"] [data-turn-action-field="action"]').should('have.value', 'none')
   })
 
+  it('reuses the normal calculator save and trainer data flows', () => {
+    cy.get('[data-dp-action="read-save"]').should('contain.text', 'Read .sav')
+    cy.get('[data-dp-action="sync-game"]').should('contain.text', 'Sync party + trainer')
+
+    cy.window().then((win) => {
+      win.currentParty = []
+      win.localStorage.currentParty = ''
+      expect(win.document.getElementById('read-save')).to.exist
+      expect(
+        win.document.getElementById('save-upload-g45') ||
+        win.document.getElementById('save-upload')
+      ).to.exist
+    })
+  })
+
   it('exports planner state as portable JSON', () => {
     cy.contains('button', '+ Pokémon').click()
     cy.window().then((win) => {

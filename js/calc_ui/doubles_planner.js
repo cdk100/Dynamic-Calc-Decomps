@@ -20,6 +20,8 @@
             playerWideGuard: false,
             enemyWideGuard: false,
             actions: { playerLeftMove: 0, playerRightMove: 0, target: "enemy-left" },
+            turnActions: {},
+            projection: null,
             slots: {}
         }
     };
@@ -250,10 +252,12 @@
             renderSide("Opponent", ["enemy-left","enemy-right"]) +
             '</div>' +
             renderDamageLab() +
+            renderTurnResolver() +
             '<div class="dp-turn-notes">' +
             '<label>Turn / line notes<textarea data-board-field="turnNotes" placeholder="Example: Protect left + double target Chandelure; next turn Torment prevents repeat Aura Sphere.">' + escapeHtml(b.turnNotes || "") + '</textarea></label>' +
             '<div class="dp-card-actions"><button type="button" data-dp-action="snapshot">Save turn snapshot</button>' +
-            '<button type="button" data-dp-action="clear-board">Clear board</button></div>' +
+            '<button type="button" data-dp-action="reset-turn">Reset turn</button>' +
+            '<button type="button" class="dp-danger" data-dp-action="clear-board">Reset board</button></div>' +
             '</div>' + renderSnapshots();
     }
 
@@ -321,6 +325,267 @@
             const label = mon ? (mon.nickname || mon.name) : (slotId.endsWith("left") ? "Enemy Left" : "Enemy Right");
             return '<option value="' + slotId + '"' + (slotId === selected ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
         }).join('');
+    }
+
+    function getTurnAction(slotId) {
+        state.board.turnActions = state.board.turnActions || {};
+        if (!state.board.turnActions[slotId]) {
+            state.board.turnActions[slotId] = { type: "none", moveIndex: 0, target: defaultTargetForSlot(slotId) };
+        }
+        return state.board.turnActions[slotId];
+    }
+
+    function defaultTargetForSlot(slotId) {
+        return slotId.startsWith("player") ? "enemy-left" : "player-left";
+    }
+
+    function renderTurnResolver() {
+        const active = ACTIVE_SLOTS.map(slotId => {
+            const slot = state.board.slots[slotId] || {};
+            const mon = getCombatant(slotId, slot.monId);
+            return mon ? {slotId, slot, mon} : null;
+        }).filter(Boolean);
+
+        if (!active.length) return "";
+
+        const cards = active.map(entry => {
+            const action = getTurnAction(entry.slotId);
+            const moveChoices = (entry.mon.moves || []).map((name,index) =>
+                name ? '<option value="move:' + index + '"' + (action.type === "move" && Number(action.moveIndex) === index ? ' selected' : '') + '>' + escapeHtml(name) + '</option>' : ''
+            ).join('');
+            const targets = targetOptionsForAction(entry.slotId, action.target);
+            return '<div class="dp-action-card" data-action-slot="' + entry.slotId + '">' +
+                '<div class="dp-action-head"><strong>' + escapeHtml(entry.mon.nickname || entry.mon.name) + '</strong><span>' + escapeHtml(entry.slotId) + '</span></div>' +
+                '<label>Action<select data-turn-action-field="action">' +
+                '<option value="none"' + (action.type === "none" ? ' selected' : '') + '>No action</option>' +
+                '<option value="protect"' + (action.type === "protect" ? ' selected' : '') + '>Protect / Detect</option>' +
+                moveChoices +
+                '</select></label>' +
+                '<label>Target<select data-turn-action-field="target"' + (action.type !== "move" ? ' disabled' : '') + '>' + targets + '</select></label>' +
+                renderActionLegality(entry, action) +
+                '</div>';
+        }).join('');
+
+        return '<section class="dp-turn-resolver">' +
+            '<div class="dp-section-head"><div><h3>Turn projector</h3><p>Choose all four actions, then preview the resulting HP ranges in actual priority / Speed order.</p></div>' +
+            '<div class="dp-card-actions"><button type="button" data-dp-action="project-turn">Project turn</button><button type="button" data-dp-action="reset-turn">Reset turn</button></div></div>' +
+            '<div class="dp-action-grid">' + cards + '</div>' +
+            renderProjection() +
+            '</section>';
+    }
+
+    function targetOptionsForAction(slotId, selected) {
+        const targets = slotId.startsWith("player") ? ["enemy-left","enemy-right"] : ["player-left","player-right"];
+        return targets.map(targetId => {
+            const slot = state.board.slots[targetId] || {};
+            const mon = getCombatant(targetId, slot.monId);
+            const label = mon ? (mon.nickname || mon.name) : targetId;
+            return '<option value="' + targetId + '"' + (targetId === selected ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+        }).join('');
+    }
+
+    function renderActionLegality(entry, action) {
+        if (action.type !== "move") return "";
+        const moveName = entry.mon.moves && entry.mon.moves[action.moveIndex] || "";
+        const issues = [];
+        if (entry.slot.tormented && entry.slot.lastMove && entry.slot.lastMove === moveName) issues.push("Torment blocks repeating " + moveName);
+        if (entry.slot.encoreTurns > 0 && entry.slot.encoreMove && entry.slot.encoreMove !== moveName) issues.push("Encore requires " + entry.slot.encoreMove);
+        if (entry.slot.disableTurns > 0 && entry.slot.disabledMove === moveName) issues.push(moveName + " is disabled");
+        if (entry.slot.choiceLockedMove && entry.slot.choiceLockedMove !== moveName) issues.push("Choice lock requires " + entry.slot.choiceLockedMove);
+        return issues.length ? '<div class="dp-action-illegal">' + issues.map(escapeHtml).join(' · ') + '</div>' : '<div class="dp-action-ok">Legal under tracked state</div>';
+    }
+
+    function actionPriority(entry, action) {
+        if (action.type === "protect") return 4;
+        if (action.type !== "move") return -10;
+        const data = entry.mon.calcData && entry.mon.calcData.moves && entry.mon.calcData.moves[action.moveIndex];
+        if (data && Number.isFinite(Number(data.priority))) return Number(data.priority);
+        try {
+            const poke = buildCalcPokemon(entry.mon, entry.slot);
+            const move = poke && poke.moves[action.moveIndex];
+            return move && Number.isFinite(Number(move.priority)) ? Number(move.priority) : 0;
+        } catch (_) {
+            return 0;
+        }
+    }
+
+    function isActionLegal(entry, action) {
+        if (action.type !== "move") return true;
+        const moveName = entry.mon.moves && entry.mon.moves[action.moveIndex] || "";
+        if (!moveName) return false;
+        if (entry.slot.tormented && entry.slot.lastMove === moveName) return false;
+        if (entry.slot.encoreTurns > 0 && entry.slot.encoreMove && entry.slot.encoreMove !== moveName) return false;
+        if (entry.slot.disableTurns > 0 && entry.slot.disabledMove === moveName) return false;
+        if (entry.slot.choiceLockedMove && entry.slot.choiceLockedMove !== moveName) return false;
+        return true;
+    }
+
+    function projectTurn() {
+        const entries = ACTIVE_SLOTS.map(slotId => {
+            const slot = state.board.slots[slotId] || {};
+            const mon = getCombatant(slotId, slot.monId);
+            if (!mon) return null;
+            const action = getTurnAction(slotId);
+            return {slotId, slot, mon, action, priority: actionPriority({slotId,slot,mon}, action)};
+        }).filter(Boolean);
+
+        const trickRoom = state.board.trickRoomTurns > 0;
+        entries.sort((a,b) => {
+            if (a.priority !== b.priority) return b.priority - a.priority;
+            const aSpeed = effectiveSpeed(a.slotId, a.slot);
+            const bSpeed = effectiveSpeed(b.slotId, b.slot);
+            return trickRoom ? aSpeed - bSpeed : bSpeed - aSpeed;
+        });
+
+        const hp = {};
+        entries.forEach(entry => {
+            const built = buildCalcPokemon(entry.mon, entry.slot);
+            const maxHp = built && typeof built.maxHP === "function" ? built.maxHP() : 1;
+            const current = Math.max(0, Math.ceil(maxHp * safeNumber(entry.slot.hpPercent,100,0,100) / 100));
+            hp[entry.slotId] = {min: current, max: current, maxHp:maxHp};
+        });
+
+        const protectedSlots = new Set(entries.filter(entry => entry.action.type === "protect").map(entry => entry.slotId));
+        const log = [];
+        const damageEvents = [];
+
+        entries.forEach(entry => {
+            const action = entry.action;
+            const actorHp = hp[entry.slotId];
+            if (!actorHp || actorHp.max <= 0) {
+                log.push({slotId:entry.slotId, text:(entry.mon.nickname || entry.mon.name) + " may already be fainted before acting.", kind:"warning"});
+                return;
+            }
+            if (action.type === "none") {
+                log.push({slotId:entry.slotId, text:(entry.mon.nickname || entry.mon.name) + " takes no action.", kind:"muted"});
+                return;
+            }
+            if (action.type === "protect") {
+                log.push({slotId:entry.slotId, text:(entry.mon.nickname || entry.mon.name) + " uses Protect / Detect.", kind:"protect"});
+                return;
+            }
+            if (!isActionLegal(entry, action)) {
+                log.push({slotId:entry.slotId, text:(entry.mon.nickname || entry.mon.name) + " has an illegal selected move under the tracked state.", kind:"illegal"});
+                return;
+            }
+
+            const moveName = entry.mon.moves[action.moveIndex];
+            const built = buildCalcPokemon(entry.mon, entry.slot);
+            const move = built && built.moves[action.moveIndex];
+            const targetIds = projectionTargets(entry.slotId, action.target, move);
+
+            if (!targetIds.length) {
+                log.push({slotId:entry.slotId, text:(entry.mon.nickname || entry.mon.name) + " uses " + moveName + ", but no valid target is active.", kind:"warning"});
+                return;
+            }
+
+            targetIds.forEach(targetId => {
+                const targetSlot = state.board.slots[targetId] || {};
+                const targetMon = getCombatant(targetId, targetSlot.monId);
+                if (!targetMon || !hp[targetId]) return;
+                if (protectedSlots.has(targetId)) {
+                    log.push({slotId:entry.slotId, text:moveName + " into " + (targetMon.nickname || targetMon.name) + " is blocked by Protect.", kind:"protect"});
+                    return;
+                }
+                const damage = calculatePlannerDamage(entry, {slotId:targetId,slot:targetSlot,mon:targetMon}, action.moveIndex);
+                if (!damage) {
+                    log.push({slotId:entry.slotId, text:"Could not calculate " + moveName + " into " + (targetMon.nickname || targetMon.name) + ".", kind:"warning"});
+                    return;
+                }
+                const targetHp = hp[targetId];
+                targetHp.min = Math.max(0, targetHp.min - damage.max);
+                targetHp.max = Math.max(0, targetHp.max - damage.min);
+                damageEvents.push({attacker:entry.slotId,target:targetId,min:damage.min,max:damage.max,moveIndex:action.moveIndex,moveName:moveName});
+                log.push({slotId:entry.slotId, text:(entry.mon.nickname || entry.mon.name) + " → " + moveName + " → " + (targetMon.nickname || targetMon.name) + ": " + damage.min + "–" + damage.max + " HP", kind:"damage"});
+            });
+        });
+
+        const results = {};
+        ACTIVE_SLOTS.forEach(slotId => {
+            if (!hp[slotId]) return;
+            results[slotId] = {
+                minHp: hp[slotId].min,
+                maxHp: hp[slotId].max,
+                maxHpTotal: hp[slotId].maxHp,
+                minPercent: hp[slotId].maxHp ? hp[slotId].min * 100 / hp[slotId].maxHp : 0,
+                maxPercent: hp[slotId].maxHp ? hp[slotId].max * 100 / hp[slotId].maxHp : 0
+            };
+        });
+
+        state.board.projection = {turn:state.board.turn, order:entries.map(e=>e.slotId), results:results, log:log, damageEvents:damageEvents};
+        saveState();
+        render();
+    }
+
+    function projectionTargets(attackerSlotId, chosenTarget, move) {
+        if (!move) return chosenTarget ? [chosenTarget] : [];
+        const target = move.target || "";
+        if (target === "allAdjacentFoes") {
+            return attackerSlotId.startsWith("player") ? ["enemy-left","enemy-right"] : ["player-left","player-right"];
+        }
+        if (target === "allAdjacent" || target === "all") {
+            return ACTIVE_SLOTS.filter(id => id !== attackerSlotId);
+        }
+        return chosenTarget ? [chosenTarget] : [];
+    }
+
+    function renderProjection() {
+        const projection = state.board.projection;
+        if (!projection) return "";
+        const order = projection.order.map((slotId,index) => {
+            const slot = state.board.slots[slotId] || {};
+            const mon = getCombatant(slotId, slot.monId);
+            return '<span>' + (index + 1) + '. ' + escapeHtml(mon ? (mon.nickname || mon.name) : slotId) + '</span>';
+        }).join('');
+
+        const hpRows = Object.keys(projection.results).map(slotId => {
+            const slot = state.board.slots[slotId] || {};
+            const mon = getCombatant(slotId, slot.monId);
+            const result = projection.results[slotId];
+            const faintText = result.maxHp <= 0 ? ' · guaranteed faint' : result.minHp <= 0 ? ' · possible faint' : '';
+            return '<div class="dp-projection-hp"><strong>' + escapeHtml(mon ? (mon.nickname || mon.name) : slotId) + '</strong><span>' +
+                result.minPercent.toFixed(1) + '–' + result.maxPercent.toFixed(1) + '% remaining' + faintText + '</span></div>';
+        }).join('');
+
+        const log = projection.log.map(item => '<div class="dp-projection-log ' + attr(item.kind) + '">' + escapeHtml(item.text) + '</div>').join('');
+
+        return '<div class="dp-projection"><div class="dp-projection-top"><div><strong>Projected Turn ' + projection.turn + '</strong><div class="dp-projection-order">' + order + '</div></div>' +
+            '<div class="dp-card-actions"><button type="button" data-dp-action="apply-min-rolls">Apply min damage</button><button type="button" data-dp-action="apply-max-rolls">Apply max damage</button><button type="button" data-dp-action="reset-turn">Reset</button></div></div>' +
+            '<div class="dp-projection-hps">' + hpRows + '</div><div class="dp-projection-log-list">' + log + '</div></div>';
+    }
+
+    function applyProjection(useMaxDamage) {
+        const projection = state.board.projection;
+        if (!projection) return;
+        Object.keys(projection.results).forEach(slotId => {
+            const result = projection.results[slotId];
+            const slot = state.board.slots[slotId];
+            if (!slot || !result.maxHpTotal) return;
+            const remainingHp = useMaxDamage ? result.minHp : result.maxHp;
+            slot.hpPercent = Math.max(0, Math.min(100, Number((remainingHp * 100 / result.maxHpTotal).toFixed(1))));
+        });
+
+        projection.damageEvents.forEach(event => {
+            const attackerSlot = state.board.slots[event.attacker];
+            const attackerMon = getCombatant(event.attacker, attackerSlot && attackerSlot.monId);
+            if (!attackerSlot || !attackerMon) return;
+            attackerSlot.lastMove = event.moveName;
+            if ((attackerMon.item || "").startsWith("Choice ") && !attackerSlot.choiceLockedMove) {
+                attackerSlot.choiceLockedMove = event.moveName;
+            }
+        });
+
+        state.board.projection = null;
+        advanceTurn(1);
+    }
+
+    function resetTurn() {
+        state.board.turnActions = {};
+        state.board.projection = null;
+        state.board.playerWideGuard = false;
+        state.board.enemyWideGuard = false;
+        saveBattleBoard();
+        render();
     }
 
     function renderSide(title, slotIds) {
@@ -777,6 +1042,10 @@
         else if (action === "prev-turn") advanceTurn(-1);
         else if (action === "next-turn") advanceTurn(1);
         else if (action === "snapshot") snapshotBoard();
+        else if (action === "project-turn") projectTurn();
+        else if (action === "apply-min-rolls") applyProjection(false);
+        else if (action === "apply-max-rolls") applyProjection(true);
+        else if (action === "reset-turn") resetTurn();
         else if (action === "restore-snapshot") {
             const snap = state.board.snapshots && state.board.snapshots[Number(button.dataset.snapshotIndex)];
             if (snap) {
@@ -824,6 +1093,26 @@
             if (!battle) return;
             battle[control.dataset.battleField] = control.value;
             saveState();
+            return;
+        }
+        if (control.dataset.turnActionField) {
+            const card = control.closest("[data-action-slot]");
+            if (!card) return;
+            const slotId = card.dataset.actionSlot;
+            const action = getTurnAction(slotId);
+            if (control.dataset.turnActionField === "action") {
+                if (control.value.indexOf("move:") === 0) {
+                    action.type = "move";
+                    action.moveIndex = Number(control.value.split(":")[1]);
+                } else {
+                    action.type = control.value;
+                }
+            } else if (control.dataset.turnActionField === "target") {
+                action.target = control.value;
+            }
+            state.board.projection = null;
+            saveBattleBoard();
+            render();
             return;
         }
         if (control.dataset.actionField) {

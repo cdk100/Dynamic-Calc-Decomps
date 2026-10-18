@@ -17,6 +17,9 @@
             terrain: "None",
             playerTailwindTurns: 0,
             enemyTailwindTurns: 0,
+            playerWideGuard: false,
+            enemyWideGuard: false,
+            actions: { playerLeftMove: 0, playerRightMove: 0, target: "enemy-left" },
             slots: {}
         }
     };
@@ -108,12 +111,22 @@
             moves: ["", "", "", ""],
             role: "",
             preserved: false,
-            tags: []
+            tags: [],
+            calcData: null
         }, mon || {});
     }
 
     function getMon(id) {
         return state.team.find(mon => mon.id === id) || null;
+    }
+
+    function getEnemy(id) {
+        const battle = getSelectedBattle();
+        return battle && Array.isArray(battle.enemies) ? battle.enemies.find(mon => mon.id === id) || null : null;
+    }
+
+    function getCombatant(slotId, monId) {
+        return slotId && slotId.startsWith("enemy") ? getEnemy(monId) : getMon(monId);
     }
 
     function render() {
@@ -143,7 +156,7 @@
             ' · portable planner state</p></div>' +
             '<div class="dp-header-actions">' +
             '<span id="doubles-planner-save-state" class="dp-muted">Saved</span>' +
-            '<button type="button" data-dp-action="import-current">Import current calc mon</button>' +
+            '<button type="button" data-dp-action="import-current">Import current player</button>' +
             '<button type="button" data-dp-action="export">Export plan</button>' +
             '<button type="button" data-dp-action="import">Import plan</button>' +
             '<button type="button" class="dp-danger" data-dp-action="reset">Reset</button>' +
@@ -172,6 +185,19 @@
             '<div class="dp-team-grid">' + cards + '</div>';
     }
 
+    function renderEnemyRoster(battle) {
+        const enemies = Array.isArray(battle.enemies) ? battle.enemies : [];
+        if (!enemies.length) {
+            return '<div class="dp-enemy-empty">No opponent sets saved yet. Load an E4 Pokémon in the normal calculator and click “Import current opponent”.</div>';
+        }
+        return '<div class="dp-enemy-head"><strong>Opponent roster</strong><span>' + enemies.length + ' saved</span></div>' +
+            '<div class="dp-enemy-grid">' + enemies.map(mon =>
+                '<div class="dp-enemy-chip"><span><strong>' + escapeHtml(mon.nickname || mon.name) + '</strong><small>Lv' + escapeHtml(mon.level) + ' · ' +
+                escapeHtml((mon.moves || []).filter(Boolean).join(' / ')) + '</small></span>' +
+                '<button type="button" data-dp-action="remove-enemy" data-enemy-id="' + mon.id + '" aria-label="Remove opponent">×</button></div>'
+            ).join('') + '</div>';
+    }
+
     function renderBattlePlanner() {
         const selected = getSelectedBattle();
         const battleRows = state.battles.length ? state.battles.map((battle, index) =>
@@ -189,7 +215,9 @@
                 '<label>Status<select data-battle-field="status">' + options(["Unplanned","Draft","Checked","Ready","Completed"], selected.status || "Unplanned") + '</select></label>' +
                 '<label class="dp-span-2">Win condition<textarea data-battle-field="winCondition" placeholder="What board state are we trying to create?">' + escapeHtml(selected.winCondition || "") + '</textarea></label>' +
                 '<label class="dp-span-2">Risks / resources<textarea data-battle-field="notes" placeholder="Crit ranges, speed ties, PP, held items, preservation constraints...">' + escapeHtml(selected.notes || "") + '</textarea></label>' +
-                '<div class="dp-span-2 dp-card-actions"><button type="button" data-dp-action="load-battle-board">Load into board</button>' +
+                '<div class="dp-span-2 dp-enemy-roster">' + renderEnemyRoster(selected) + '</div>' +
+                '<div class="dp-span-2 dp-card-actions"><button type="button" data-dp-action="import-opponent">Import current opponent</button>' +
+                '<button type="button" data-dp-action="load-battle-board">Load into board</button>' +
                 '<button type="button" class="dp-danger" data-dp-action="remove-battle">Remove battle</button></div>' +
                 '</div>';
         }
@@ -210,6 +238,8 @@
             numberField("trickRoomTurns", "Trick Room", b.trickRoomTurns, 0, 5) +
             numberField("playerTailwindTurns", "Your Tailwind", b.playerTailwindTurns, 0, 4) +
             numberField("enemyTailwindTurns", "Enemy Tailwind", b.enemyTailwindTurns, 0, 4) +
+            '<label class="dp-check-field"><span>Your Wide Guard</span><input type="checkbox" data-board-field="playerWideGuard"' + (b.playerWideGuard ? ' checked' : '') + '></label>' +
+            '<label class="dp-check-field"><span>Enemy Wide Guard</span><input type="checkbox" data-board-field="enemyWideGuard"' + (b.enemyWideGuard ? ' checked' : '') + '></label>' +
             '</div>' +
             '<div class="dp-speed-strip"><span class="dp-speed-label">Action speed</span>' +
             (speedOrder.length ? speedOrder.map((entry, i) => '<span class="dp-speed-chip">' + (i + 1) + ' · ' + escapeHtml(entry.label) + ' <strong>' + entry.speed + '</strong></span>').join("") : '<span class="dp-muted">Assign active Pokémon and speeds.</span>') +
@@ -219,11 +249,78 @@
             renderSide("Your side", ["player-left","player-right"]) +
             renderSide("Opponent", ["enemy-left","enemy-right"]) +
             '</div>' +
+            renderDamageLab() +
             '<div class="dp-turn-notes">' +
             '<label>Turn / line notes<textarea data-board-field="turnNotes" placeholder="Example: Protect left + double target Chandelure; next turn Torment prevents repeat Aura Sphere.">' + escapeHtml(b.turnNotes || "") + '</textarea></label>' +
             '<div class="dp-card-actions"><button type="button" data-dp-action="snapshot">Save turn snapshot</button>' +
             '<button type="button" data-dp-action="clear-board">Clear board</button></div>' +
             '</div>' + renderSnapshots();
+    }
+
+    function renderDamageLab() {
+        const active = ACTIVE_SLOTS.map(slotId => {
+            const slot = state.board.slots[slotId] || {};
+            const mon = getCombatant(slotId, slot.monId);
+            return mon ? { slotId, slot, mon } : null;
+        }).filter(Boolean);
+        if (!active.length) {
+            return '<section class="dp-damage-lab"><div class="dp-section-head"><div><h3>Damage matrix</h3><p>Assign active Pokémon to calculate with Dynamic Calc.</p></div></div></section>';
+        }
+
+        const rows = active.map(attacker => {
+            const targets = active.filter(defender => defender.slotId.startsWith("player") !== attacker.slotId.startsWith("player"));
+            if (!targets.length) return '';
+            return '<div class="dp-damage-attacker"><div class="dp-damage-attacker-head"><strong>' + escapeHtml(attacker.mon.nickname || attacker.mon.name) + '</strong>' +
+                '<span>' + (attacker.slotId.startsWith("player") ? 'Your side' : 'Opponent') + '</span></div>' +
+                '<div class="dp-damage-moves">' + (attacker.mon.moves || []).map((moveName, moveIndex) => {
+                    if (!moveName) return '';
+                    return '<div class="dp-damage-move"><span class="dp-damage-move-name">' + escapeHtml(moveName) + '</span>' +
+                        targets.map(defender => '<span class="dp-damage-cell">' + escapeHtml(defender.mon.nickname || defender.mon.name) + ': <strong>' +
+                        escapeHtml(formatDamageCell(calculatePlannerDamage(attacker, defender, moveIndex))) + '</strong></span>').join('') + '</div>';
+                }).join('') + '</div></div>';
+        }).join('');
+
+        return '<section class="dp-damage-lab"><div class="dp-section-head"><div><h3>Damage matrix</h3><p>Uses the existing Dynamic Calc engine, including the current hack data and Doubles spread modifier.</p></div></div>' +
+            '<div class="dp-damage-grid">' + rows + '</div>' + renderDoubleUp() + '</section>';
+    }
+
+    function renderDoubleUp() {
+        const leftSlot = state.board.slots["player-left"] || {};
+        const rightSlot = state.board.slots["player-right"] || {};
+        const left = getMon(leftSlot.monId);
+        const right = getMon(rightSlot.monId);
+        const targetSlotId = state.board.actions && state.board.actions.target || "enemy-left";
+        const targetSlot = state.board.slots[targetSlotId] || {};
+        const target = getEnemy(targetSlot.monId);
+        if (!left || !right || !target) return '';
+
+        const actions = state.board.actions || (state.board.actions = { playerLeftMove: 0, playerRightMove: 0, target: "enemy-left" });
+        const leftIdx = safeNumber(actions.playerLeftMove, 0, 0, 3);
+        const rightIdx = safeNumber(actions.playerRightMove, 0, 0, 3);
+        const d1 = calculatePlannerDamage({slotId:"player-left",slot:leftSlot,mon:left},{slotId:targetSlotId,slot:targetSlot,mon:target},leftIdx);
+        const d2 = calculatePlannerDamage({slotId:"player-right",slot:rightSlot,mon:right},{slotId:targetSlotId,slot:targetSlot,mon:target},rightIdx);
+        const combined = combineDamageRanges(d1, d2);
+        const currentHp = combined && combined.defenderHp ? Math.ceil(combined.defenderHp * safeNumber(targetSlot.hpPercent,100,0,100) / 100) : 0;
+        const verdict = combined && currentHp ? (combined.min >= currentHp ? 'Guaranteed KO from current HP' : combined.max >= currentHp ? 'Roll / conditional KO' : 'Does not KO from current HP') : 'Assign valid moves';
+
+        return '<div class="dp-double-up"><div><strong>Double-up check</strong><span>' + escapeHtml(verdict) + '</span></div>' +
+            '<label>' + escapeHtml(left.nickname || left.name) + '<select data-action-field="playerLeftMove">' + moveOptions(left.moves,leftIdx) + '</select></label>' +
+            '<label>' + escapeHtml(right.nickname || right.name) + '<select data-action-field="playerRightMove">' + moveOptions(right.moves,rightIdx) + '</select></label>' +
+            '<label>Target<select data-action-field="target">' + enemyTargetOptions(targetSlotId) + '</select></label>' +
+            '<div class="dp-double-up-result">' + (combined ? escapeHtml(combined.min + '–' + combined.max + ' HP combined' + (currentHp ? ' vs ' + currentHp + ' current HP' : '')) : '—') + '</div></div>';
+    }
+
+    function moveOptions(moves, selected) {
+        return (moves || []).map((name,index) => name ? '<option value="' + index + '"' + (index === Number(selected) ? ' selected' : '') + '>' + escapeHtml(name) + '</option>' : '').join('');
+    }
+
+    function enemyTargetOptions(selected) {
+        return ["enemy-left","enemy-right"].map(slotId => {
+            const slot = state.board.slots[slotId] || {};
+            const mon = getEnemy(slot.monId);
+            const label = mon ? (mon.nickname || mon.name) : (slotId.endsWith("left") ? "Enemy Left" : "Enemy Right");
+            return '<option value="' + slotId + '"' + (slotId === selected ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+        }).join('');
     }
 
     function renderSide(title, slotIds) {
@@ -232,7 +329,8 @@
 
     function renderSlot(slotId) {
         const slot = Object.assign({ monId: "", label: slotId }, emptyVolatile(), state.board.slots[slotId] || {});
-        const teamOptions = '<option value="">— Empty —</option>' + state.team.map(mon =>
+        const sourceMons = slotId.startsWith("enemy") ? ((getSelectedBattle() && getSelectedBattle().enemies) || []) : state.team;
+        const teamOptions = '<option value="">— Empty —</option>' + sourceMons.map(mon =>
             '<option value="' + mon.id + '"' + (slot.monId === mon.id ? " selected" : "") + '>' + escapeHtml(mon.nickname || mon.name) + '</option>'
         ).join("");
         return '<article class="dp-slot" data-slot-id="' + slotId + '">' +
@@ -312,12 +410,133 @@
         const rows = ACTIVE_SLOTS.map(slotId => {
             const slot = state.board.slots[slotId];
             if (!slot || !slot.monId) return null;
-            const mon = getMon(slot.monId);
+            const mon = getCombatant(slotId, slot.monId);
             if (!mon) return null;
             return { slotId, label: mon.nickname || mon.name, speed: effectiveSpeed(slotId, slot) };
         }).filter(Boolean);
         rows.sort((a, b) => state.board.trickRoomTurns > 0 ? a.speed - b.speed : b.speed - a.speed);
         return rows;
+    }
+
+    function buildCalcPokemon(mon, slot) {
+        if (!mon || typeof window.calc !== "object" || typeof window.calc.Pokemon !== "function") return null;
+        const data = mon.calcData || {};
+        const generation = typeof window.gen === "number" ? window.gen : (state.game.generation || 5);
+        const moveData = Array.isArray(data.moves) && data.moves.length ? data.moves : (mon.moves || []).map(name => ({name:name}));
+        const moves = moveData.slice(0,4).map(move => {
+            const name = move && move.name || "(No Move)";
+            const overrides = {};
+            if (move && Number(move.basePower) > 0) overrides.basePower = Number(move.basePower);
+            if (move && move.type) overrides.type = move.type;
+            if (move && move.category) overrides.category = move.category;
+            return new window.calc.Move(generation, name, {
+                ability: mon.ability || data.ability || "",
+                item: mon.item || data.item || "",
+                species: mon.name,
+                overrides: Object.keys(overrides).length ? overrides : undefined
+            });
+        });
+        while (moves.length < 4) moves.push(new window.calc.Move(generation, "(No Move)"));
+
+        const boosts = Object.assign({}, data.boosts || {});
+        boosts.atk = safeNumber(slot && slot.attackStage, boosts.atk || 0, -6, 6);
+        boosts.def = safeNumber(slot && slot.defenseStage, boosts.def || 0, -6, 6);
+        boosts.spa = safeNumber(slot && slot.spaStage, boosts.spa || 0, -6, 6);
+        boosts.spd = safeNumber(slot && slot.spdStage, boosts.spd || 0, -6, 6);
+        boosts.spe = safeNumber(slot && slot.speedStage, boosts.spe || 0, -6, 6);
+
+        const statusMap = { Burned:"brn", Paralyzed:"par", Poisoned:"psn", "Badly Poisoned":"tox", Asleep:"slp", Frozen:"frz", Healthy:"" };
+        const overrides = {};
+        if (data.baseStats) overrides.baseStats = Object.assign({}, data.baseStats);
+        if (data.types && data.types.length) overrides.types = data.types.slice(0,2);
+
+        return new window.calc.Pokemon(generation, data.name || mon.name, {
+            level: mon.level || data.level || 50,
+            ability: mon.ability || data.ability || "",
+            abilityOn: true,
+            item: mon.item || data.item || "",
+            gender: data.gender || "N",
+            nature: mon.nature || data.nature || undefined,
+            ivs: Object.assign({}, data.ivs || {}),
+            evs: Object.assign({}, data.evs || {}),
+            boosts: boosts,
+            status: statusMap[slot && slot.status || "Healthy"] || "",
+            moves: moves,
+            overrides: Object.keys(overrides).length ? overrides : undefined
+        });
+    }
+
+    function plannerField(attackerSlotId) {
+        if (typeof window.calc !== "object" || typeof window.calc.Field !== "function") return null;
+        const playerAttacking = attackerSlotId.startsWith("player");
+        const ownTailwind = playerAttacking ? state.board.playerTailwindTurns : state.board.enemyTailwindTurns;
+        const foeTailwind = playerAttacking ? state.board.enemyTailwindTurns : state.board.playerTailwindTurns;
+        const weather = state.board.weather && state.board.weather !== "None" ? state.board.weather : undefined;
+        const terrain = state.board.terrain && state.board.terrain !== "None" ? state.board.terrain : undefined;
+        return new window.calc.Field({
+            gameType: "Doubles",
+            weather: weather,
+            terrain: terrain,
+            attackerSide: { isTailwind: ownTailwind > 0 },
+            defenderSide: { isTailwind: foeTailwind > 0 }
+        });
+    }
+
+    function moveIsSpread(move) {
+        if (!move) return false;
+        const spreadTargets = ["allAdjacent","allAdjacentFoes","all"];
+        if (spreadTargets.includes(move.target)) return true;
+        const known = ["Surf","Earthquake","Rock Slide","Heat Wave","Discharge","Blizzard","Muddy Water","Sludge Wave","Lava Plume","Bulldoze","Razor Leaf","Air Cutter","Swift","Hyper Voice","Icy Wind"];
+        return known.includes(move.originalName || move.name);
+    }
+
+    function calculatePlannerDamage(attackerEntry, defenderEntry, moveIndex) {
+        try {
+            if (!attackerEntry || !defenderEntry || !attackerEntry.mon || !defenderEntry.mon) return null;
+            const attacker = buildCalcPokemon(attackerEntry.mon, attackerEntry.slot);
+            const defender = buildCalcPokemon(defenderEntry.mon, defenderEntry.slot);
+            if (!attacker || !defender) return null;
+            const move = attacker.moves[moveIndex];
+            if (!move || move.name === "(No Move)") return null;
+
+            const defenderWideGuard = defenderEntry.slotId.startsWith("player") ? state.board.playerWideGuard : state.board.enemyWideGuard;
+            if (defenderWideGuard && moveIsSpread(move)) {
+                return { min:0, max:0, defenderHp:defender.maxHP(), blocked:"Wide Guard", move:move };
+            }
+
+            const damageGen = window.settings && Number(window.settings.damageGen) || state.game.generation || 5;
+            const field = plannerField(attackerEntry.slotId);
+            const result = window.calc.calculate(damageGen, attacker, defender, move, field);
+            const range = result && typeof result.range === "function" ? result.range() : null;
+            if (!range || !Number.isFinite(Number(range[0])) || !Number.isFinite(Number(range[1]))) return null;
+            return {
+                min: Number(range[0]),
+                max: Number(range[1]),
+                defenderHp: defender.maxHP(),
+                move: move,
+                spread: moveIsSpread(move)
+            };
+        } catch (error) {
+            console.warn("Planner damage calculation failed", error);
+            return null;
+        }
+    }
+
+    function formatDamageCell(result) {
+        if (!result) return "—";
+        if (result.blocked) return result.blocked;
+        const minPct = result.defenderHp ? (result.min * 100 / result.defenderHp) : 0;
+        const maxPct = result.defenderHp ? (result.max * 100 / result.defenderHp) : 0;
+        return result.min + "–" + result.max + " (" + minPct.toFixed(1) + "–" + maxPct.toFixed(1) + "%)" + (result.spread ? " spread" : "");
+    }
+
+    function combineDamageRanges(a, b) {
+        if (!a || !b) return null;
+        return {
+            min: a.min + b.min,
+            max: a.max + b.max,
+            defenderHp: a.defenderHp || b.defenderHp
+        };
     }
 
     function getSelectedBattle() {
@@ -355,30 +574,81 @@
         render();
     }
 
-    function importCurrentCalcMon() {
-        const left = document.querySelector("#p1");
-        if (!left) {
-            alert("Calculator Pokémon panel was not found.");
-            return;
+    function captureCalculatorPokemon(selector) {
+        if (typeof window.createPokemon !== "function" || typeof window.$ !== "function") return null;
+        try {
+            const poke = window.createPokemon(window.$(selector));
+            if (!poke) return null;
+            const moves = (poke.moves || []).slice(0,4).map(move => ({
+                name: move.originalName || move.name || "",
+                basePower: Number(move.bp || move.basePower || 0),
+                type: move.type || "",
+                category: move.category || "",
+                priority: Number(move.priority || 0),
+                target: move.target || "",
+                isCrit: !!move.isCrit
+            }));
+            return {
+                name: poke.name,
+                level: poke.level,
+                item: poke.item || "",
+                ability: poke.ability || "",
+                nature: poke.nature || "",
+                gender: poke.gender || "N",
+                ivs: Object.assign({}, poke.ivs || {}),
+                evs: Object.assign({}, poke.evs || {}),
+                boosts: Object.assign({}, poke.boosts || {}),
+                baseStats: poke.species && poke.species.baseStats ? Object.assign({}, poke.species.baseStats) : null,
+                types: Array.isArray(poke.types) ? poke.types.slice(0,2) : [],
+                moves: moves
+            };
+        } catch (error) {
+            console.warn("Planner import failed", error);
+            return null;
         }
-        const speciesSelect = left.querySelector(".set-selector");
-        const levelInput = left.querySelector(".level");
-        const itemSelect = left.querySelector(".item");
-        const abilitySelect = left.querySelector(".ability");
-        const moveSelects = Array.from(left.querySelectorAll(".move-selector")).slice(0, 4);
-        const rawName = speciesSelect ? String(speciesSelect.value || "") : "";
-        const species = rawName.split(" (")[0] || rawName || "Pokemon";
+    }
+
+    function importedMonFromCalc(selector) {
+        const data = captureCalculatorPokemon(selector);
+        if (!data) return null;
+        return normalizeMon({
+            name: data.name || "Pokemon",
+            level: data.level || 50,
+            item: data.item,
+            ability: data.ability,
+            nature: data.nature,
+            moves: data.moves.map(move => move.name),
+            calcData: data
+        });
+    }
+
+    function importCurrentCalcMon() {
         if (state.team.length >= MAX_TEAM) {
             alert("Your planner team already has six Pokémon.");
             return;
         }
-        state.team.push(normalizeMon({
-            name: species,
-            level: safeNumber(levelInput && levelInput.value, 50, 1, 100),
-            item: itemSelect ? itemSelect.value : "",
-            ability: abilitySelect ? abilitySelect.value : "",
-            moves: moveSelects.map(el => el.value || "")
-        }));
+        const mon = importedMonFromCalc("#p1");
+        if (!mon) {
+            alert("Could not read the current player Pokémon from Dynamic Calc.");
+            return;
+        }
+        state.team.push(mon);
+        render();
+    }
+
+    function importCurrentOpponent() {
+        const battle = getSelectedBattle();
+        if (!battle) {
+            alert("Add or select a battle first.");
+            return;
+        }
+        battle.enemies = Array.isArray(battle.enemies) ? battle.enemies : [];
+        const mon = importedMonFromCalc("#p2");
+        if (!mon) {
+            alert("Could not read the current opponent from Dynamic Calc.");
+            return;
+        }
+        battle.enemies.push(mon);
         render();
     }
 
@@ -390,6 +660,7 @@
             status: "Unplanned",
             winCondition: "",
             notes: "",
+            enemies: [],
             board: null
         };
         state.battles.push(battle);
@@ -549,9 +820,16 @@
             saveState();
             return;
         }
+        if (control.dataset.actionField) {
+            state.board.actions = state.board.actions || { playerLeftMove: 0, playerRightMove: 0, target: "enemy-left" };
+            state.board.actions[control.dataset.actionField] = control.dataset.actionField === "target" ? control.value : Number(control.value);
+            saveBattleBoard();
+            render();
+            return;
+        }
         if (control.dataset.boardField) {
             const field = control.dataset.boardField;
-            state.board[field] = control.type === "number" ? safeNumber(control.value, 0, 0, 9999) : control.value;
+            state.board[field] = control.type === "checkbox" ? control.checked : control.type === "number" ? safeNumber(control.value, 0, 0, 9999) : control.value;
             saveBattleBoard();
             if (field !== "turnNotes") render();
             else saveState();

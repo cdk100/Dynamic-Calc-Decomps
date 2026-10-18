@@ -47,6 +47,26 @@ describe('Team and doubles planner', () => {
     cy.get('[data-slot-id="player-left"] [data-slot-field="encoreTurns"]').should('have.value', '1')
   })
 
+  it('imports calculator combatants and renders live damage ranges', () => {
+    cy.get('#p1 .set-selector').should(($input) => {
+      expect(String($input.val() || '').length).to.be.greaterThan(0)
+    })
+    cy.get('#p2 .set-selector').should(($input) => {
+      expect(String($input.val() || '').length).to.be.greaterThan(0)
+    })
+
+    cy.get('.main-view-tab[data-view="planner"]').click()
+    cy.contains('button', 'Import current player').click()
+    cy.contains('button', '+ Battle').click()
+    cy.contains('button', 'Import current opponent').click()
+
+    cy.get('[data-slot-id="player-left"] [data-slot-field="monId"]').select(1)
+    cy.get('[data-slot-id="enemy-left"] [data-slot-field="monId"]').select(1)
+
+    cy.get('.dp-damage-lab').should('be.visible')
+    cy.get('.dp-damage-cell strong').first().invoke('text').should('match', /\d+.*\d+.*%/)
+  })
+
   it('exports planner state as portable JSON', () => {
     cy.contains('button', '+ Pokémon').click()
     cy.window().then((win) => {

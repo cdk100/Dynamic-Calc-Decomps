@@ -158,7 +158,9 @@
             ' · portable planner state</p></div>' +
             '<div class="dp-header-actions">' +
             '<span id="doubles-planner-save-state" class="dp-muted">Saved</span>' +
-            '<button type="button" data-dp-action="import-current">Import current player</button>' +
+            '<button type="button" data-dp-action="read-save">Read .sav</button>' +
+            '<button type="button" data-dp-action="sync-game">Sync party + trainer</button>' +
+            '<button type="button" data-dp-action="import-current">Add current player</button>' +
             '<button type="button" data-dp-action="export">Export plan</button>' +
             '<button type="button" data-dp-action="import">Import plan</button>' +
             '<button type="button" class="dp-danger" data-dp-action="reset">Reset</button>' +
@@ -905,6 +907,217 @@
         });
     }
 
+    function cleanTrainerSetId(setId) {
+        return String(setId || "").replace(/\[\d+\]$/, "");
+    }
+
+    function setIdSpecies(setId) {
+        const clean = cleanTrainerSetId(setId);
+        const marker = clean.indexOf(" (");
+        return marker >= 0 ? clean.slice(0, marker) : clean;
+    }
+
+    function setIdTrainerName(setId) {
+        const clean = cleanTrainerSetId(setId);
+        const start = clean.indexOf(" (");
+        const end = clean.lastIndexOf(")");
+        return start >= 0 && end > start ? clean.slice(start + 2, end) : "";
+    }
+
+    function monFromSetId(setId, existingId) {
+        const clean = cleanTrainerSetId(setId);
+        if (!clean) return null;
+        try {
+            if (typeof window.createPokemon === "function") {
+                const poke = window.createPokemon(clean);
+                if (poke) {
+                    const moves = (poke.moves || []).slice(0,4).map(move => ({
+                        name: move.originalName || move.name || "",
+                        basePower: Number(move.bp || move.basePower || 0),
+                        type: move.type || "",
+                        category: move.category || "",
+                        priority: Number(move.priority || 0),
+                        target: move.target || "",
+                        isCrit: !!move.isCrit
+                    }));
+                    return normalizeMon({
+                        id: existingId || uid("mon"),
+                        name: poke.name || setIdSpecies(clean),
+                        level: poke.level || 50,
+                        item: poke.item || "",
+                        ability: poke.ability || "",
+                        nature: poke.nature || "",
+                        moves: moves.map(move => move.name),
+                        calcData: {
+                            name: poke.name || setIdSpecies(clean),
+                            level: poke.level || 50,
+                            item: poke.item || "",
+                            ability: poke.ability || "",
+                            nature: poke.nature || "",
+                            gender: poke.gender || "N",
+                            ivs: Object.assign({}, poke.ivs || {}),
+                            evs: Object.assign({}, poke.evs || {}),
+                            boosts: Object.assign({}, poke.boosts || {}),
+                            baseStats: poke.species && poke.species.baseStats ? Object.assign({}, poke.species.baseStats) : null,
+                            types: Array.isArray(poke.types) ? poke.types.slice(0,2) : [],
+                            speed: poke.stats && Number.isFinite(Number(poke.stats.spe)) ? Number(poke.stats.spe) : 0,
+                            moves: moves
+                        }
+                    });
+                }
+            }
+        } catch (error) {
+            console.warn("Planner set import failed", clean, error);
+        }
+
+        const species = setIdSpecies(clean);
+        const setData = window.customSets && window.customSets[species] && window.customSets[species]["My Box"];
+        if (!setData) return null;
+        return normalizeMon({
+            id: existingId || uid("mon"),
+            name: species,
+            nickname: setData.nickname || "",
+            level: Number(setData.level) || 50,
+            item: setData.item || "",
+            ability: setData.ability || "",
+            nature: setData.nature || "",
+            moves: Array.isArray(setData.moves) ? setData.moves.slice(0,4) : []
+        });
+    }
+
+    function syncPartyFromCalculator() {
+        const partySpecies = Array.isArray(window.currentParty)
+            ? window.currentParty.slice(0, MAX_TEAM)
+            : String(localStorage.currentParty || "").split(",").filter(Boolean).slice(0, MAX_TEAM);
+
+        if (!partySpecies.length) {
+            return {count:0, message:"No imported party found. Use Read .sav first, or import your box in the normal calculator."};
+        }
+
+        const previousBySpecies = {};
+        state.team.forEach(mon => {
+            if (!previousBySpecies[mon.name]) previousBySpecies[mon.name] = [];
+            previousBySpecies[mon.name].push(mon);
+        });
+
+        const synced = [];
+        partySpecies.forEach(species => {
+            const previous = previousBySpecies[species] && previousBySpecies[species].shift();
+            const imported = monFromSetId(species + " (My Box)", previous && previous.id);
+            if (!imported) return;
+            if (previous) {
+                imported.role = previous.role || "";
+                imported.preserved = !!previous.preserved;
+                imported.tags = Array.isArray(previous.tags) ? previous.tags.slice() : [];
+            }
+            synced.push(imported);
+        });
+
+        if (synced.length) state.team = synced;
+        return {count:synced.length, message:synced.length + " party Pokémon synced from the normal calculator."};
+    }
+
+    function syncTrainerFromCalculator() {
+        const trainerSets = Array.isArray(window.CURRENT_TRAINER_POKS)
+            ? window.CURRENT_TRAINER_POKS.slice()
+            : (typeof CURRENT_TRAINER_POKS !== "undefined" && Array.isArray(CURRENT_TRAINER_POKS) ? CURRENT_TRAINER_POKS.slice() : []);
+
+        if (!trainerSets.length) {
+            return {count:0, message:"No trainer roster is currently loaded. Select the E4 trainer in Calculator first."};
+        }
+
+        let battle = getSelectedBattle();
+        if (!battle) {
+            const firstTrainer = setIdTrainerName(trainerSets[0]) || "Current Trainer";
+            battle = {
+                id: uid("battle"),
+                name: firstTrainer,
+                format: "Doubles",
+                status: "Draft",
+                winCondition: "",
+                notes: "",
+                enemies: [],
+                board: null
+            };
+            state.battles.push(battle);
+            state.selectedBattleId = battle.id;
+        }
+
+        const existingBySet = {};
+        (battle.enemies || []).forEach(mon => {
+            const key = mon.sourceSetId || (mon.name + "|" + mon.level + "|" + (mon.moves || []).join(","));
+            existingBySet[key] = mon;
+        });
+
+        battle.enemies = trainerSets.map(rawSetId => {
+            const clean = cleanTrainerSetId(rawSetId);
+            const existing = existingBySet[clean];
+            const imported = monFromSetId(clean, existing && existing.id);
+            if (!imported) return null;
+            imported.sourceSetId = clean;
+            return imported;
+        }).filter(Boolean);
+
+        const trainerName = setIdTrainerName(trainerSets[0]);
+        if (trainerName && (!battle.name || /^Elite Four \d+$/.test(battle.name) || battle.name === "Current Trainer")) {
+            battle.name = trainerName;
+        }
+
+        return {count:battle.enemies.length, message:battle.enemies.length + " opponent Pokémon synced from " + (trainerName || "the current trainer") + "."};
+    }
+
+    function syncFromCalculator(showMessage) {
+        const partyResult = syncPartyFromCalculator();
+        const trainerResult = syncTrainerFromCalculator();
+        state.board.projection = null;
+        saveState();
+        render();
+        if (showMessage) {
+            const messages = [partyResult.message, trainerResult.message].filter(Boolean);
+            alert(messages.join("\n"));
+        }
+        return {party:partyResult, trainer:trainerResult};
+    }
+
+    function openExistingSaveReader() {
+        const label = document.getElementById("read-save");
+        const inputId = label && label.getAttribute("for");
+        const input = (inputId && document.getElementById(inputId))
+            || document.getElementById("save-upload-g45")
+            || document.getElementById("save-upload");
+        if (!input) {
+            alert("This calculator profile does not expose a save reader.");
+            return;
+        }
+        input.value = "";
+        input.click();
+    }
+
+    function installSaveSyncHook() {
+        ["save-upload-g45","save-upload"].forEach(id => {
+            const input = document.getElementById(id);
+            if (!input || input.dataset.dpSyncHook === "1") return;
+            input.dataset.dpSyncHook = "1";
+            input.addEventListener("change", function () {
+                const before = String(localStorage.customsets || "");
+                let attempts = 0;
+                const timer = window.setInterval(function () {
+                    attempts += 1;
+                    const changed = String(localStorage.customsets || "") !== before;
+                    const hasParty = (Array.isArray(window.currentParty) && window.currentParty.length) || localStorage.currentParty;
+                    if ((changed && hasParty) || attempts >= 30) {
+                        window.clearInterval(timer);
+                        if (changed || hasParty) {
+                            syncPartyFromCalculator();
+                            saveState();
+                            if (typeof window.getCurrentMainPageView === "function" && window.getCurrentMainPageView() === "planner") render();
+                        }
+                    }
+                }, 250);
+            });
+        });
+    }
+
     function importCurrentCalcMon() {
         if (state.team.length >= MAX_TEAM) {
             alert("Your planner team already has six Pokémon.");
@@ -1180,6 +1393,7 @@
         if (initialized) return;
         initialized = true;
         ensureView();
+        installSaveSyncHook();
         render();
         window.renderDoublesPlanner = render;
     }

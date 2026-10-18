@@ -394,7 +394,10 @@
     }
 
     function effectiveSpeed(slotId, slot) {
-        let speed = safeNumber(slot.speed, 0, 0, 9999);
+        const mon = getCombatant(slotId, slot.monId);
+        const importedSpeed = mon && mon.calcData ? safeNumber(mon.calcData.speed, 0, 0, 9999) : 0;
+        let speed = safeNumber(slot.speed, importedSpeed, 0, 9999);
+        if (speed === 0 && importedSpeed > 0) speed = importedSpeed;
         const stage = safeNumber(slot.speedStage, 0, -6, 6);
         speed = stage >= 0 ? Math.floor(speed * (2 + stage) / 2) : Math.floor(speed * 2 / (2 - stage));
         if (slot.status === "Paralyzed") {
@@ -600,6 +603,7 @@
                 boosts: Object.assign({}, poke.boosts || {}),
                 baseStats: poke.species && poke.species.baseStats ? Object.assign({}, poke.species.baseStats) : null,
                 types: Array.isArray(poke.types) ? poke.types.slice(0,2) : [],
+                speed: poke.stats && Number.isFinite(Number(poke.stats.spe)) ? Number(poke.stats.spe) : 0,
                 moves: moves
             };
         } catch (error) {
@@ -743,6 +747,8 @@
     }
 
     function wireEvents(root) {
+        if (root.dataset.dpWired === "1") return;
+        root.dataset.dpWired = "1";
         root.addEventListener("click", onClick);
         root.addEventListener("change", onChange);
         root.addEventListener("input", onInput);
@@ -845,6 +851,11 @@
             if (control.type === "checkbox") slot[field] = control.checked;
             else if (control.type === "number" || ["speedStage","attackStage","defenseStage","spaStage","spdStage"].includes(field)) slot[field] = Number(control.value);
             else slot[field] = control.value;
+            if (field === "monId") {
+                const selected = getCombatant(slotId, slot.monId);
+                const importedSpeed = selected && selected.calcData ? safeNumber(selected.calcData.speed, 0, 0, 9999) : 0;
+                if (importedSpeed > 0) slot.speed = importedSpeed;
+            }
             saveBattleBoard();
             if (["monId","speed","speedStage","status","tormented","lastMove","encoreMove","encoreTurns","disabledMove","disableTurns","choiceLockedMove"].includes(field)) render();
             else saveState();

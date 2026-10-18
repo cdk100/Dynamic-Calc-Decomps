@@ -104,3 +104,21 @@ This package is distributed under the terms of the MIT License.
 
 
 
+
+
+## Team & Doubles Planner (development branch)
+
+The `blaze-black-doubles-planner` branch adds a reusable planning workspace aimed at Nuzlocke boss sequences and doubles-heavy fights.
+
+Current planner features:
+- Persistent team-of-six roster with roles and preservation flags
+- Boss / Elite Four sequence tracking with per-fight notes and status
+- 2v2 board state with left/right active slots
+- Explicit speed-order display with Speed stages, paralysis, Tailwind, and Trick Room
+- Persistent volatile tracking for Torment, Encore, Disable, Protect chains, Choice lock, HP%, status, and stat stages
+- Turn advancement with duration countdowns
+- Saved board snapshots for comparing lines
+- JSON import/export so plans can be carried between games and future ROM hacks
+- Import the currently loaded calculator Pokémon into the planner team
+
+The planner is intentionally game-agnostic. Blaze Black is the first target, but the state model is designed to support future games and generations without hardcoding one hack.

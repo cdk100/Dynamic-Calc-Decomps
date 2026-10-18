@@ -39,6 +39,41 @@
             .find((key) => title.includes(key)) || null;
     }
 
+    function ensurePlannerTabAndAssets() {
+        const primaryTabs = document.querySelector(".main-view-tabs-primary");
+        if (primaryTabs && !document.querySelector('.main-view-tab[data-view="planner"]')) {
+            const plannerTab = document.createElement("button");
+            plannerTab.type = "button";
+            plannerTab.className = "main-view-tab";
+            plannerTab.setAttribute("data-view", "planner");
+            plannerTab.textContent = "Planner";
+            primaryTabs.appendChild(plannerTab);
+        }
+
+        if (!document.getElementById("doubles-planner-styles")) {
+            const link = document.createElement("link");
+            link.id = "doubles-planner-styles";
+            link.rel = "stylesheet";
+            link.href = "./css/doubles_planner.css?1";
+            document.head.appendChild(link);
+        }
+
+        if (!document.getElementById("doubles-planner-script")) {
+            const script = document.createElement("script");
+            script.id = "doubles-planner-script";
+            script.src = "./js/calc_ui/doubles_planner.js?1";
+            script.onload = function () {
+                if (typeof window.initializeDoublesPlanner === "function") {
+                    window.initializeDoublesPlanner();
+                }
+                if (currentMainPageView === "planner") {
+                    setMainPageView("planner", { skipHistory: true });
+                }
+            };
+            document.body.appendChild(script);
+        }
+    }
+
     function ensureDashboardLink() {
         const primaryTabs = document.querySelector(".main-view-tabs-primary");
         if (!primaryTabs) {
@@ -162,6 +197,7 @@
             "main-page-calculator-view",
             "main-page-dex-view",
             "main-page-box-view",
+            "main-page-planner-view",
             "main-page-fragsheet-view",
             "main-page-battle-log-view"
         );
@@ -190,6 +226,7 @@
         const dexView = document.getElementById("dex-view");
         const fragsheetShell = document.getElementById("fragsheet-shell");
         const boxView = document.getElementById("box-view");
+        const plannerView = document.getElementById("doubles-planner-view");
 
         if (calculatorView) {
             calculatorView.style.display = viewName === "calculator" ? "block" : "none";
@@ -202,6 +239,9 @@
         }
         if (boxView) {
             boxView.style.display = viewName === "box" ? "block" : "none";
+        }
+        if (plannerView) {
+            plannerView.style.display = viewName === "planner" ? "block" : "none";
         }
     }
 
@@ -247,7 +287,7 @@
         if (requested === "fragsheet" && !isFragsheetAvailable()) {
             return "calculator";
         }
-        if (["calculator", "dex", "box", "fragsheet", "battle-log"].includes(requested)) {
+        if (["calculator", "dex", "box", "planner", "fragsheet", "battle-log"].includes(requested)) {
             return requested;
         }
         return "calculator";
@@ -326,6 +366,13 @@
             if (typeof window.renderBoxView === "function") {
                 window.renderBoxView(true);
             }
+        } else if (nextView === "planner") {
+            if (typeof window.initializeDoublesPlanner === "function") {
+                window.initializeDoublesPlanner();
+            }
+            if (typeof window.renderDoublesPlanner === "function") {
+                window.renderDoublesPlanner();
+            }
         } else if (document.body.classList.contains("battle-log-mode")) {
             setEmbeddedMode("fragsheet");
         }
@@ -382,6 +429,7 @@
             return;
         }
         mainNavInitialized = true;
+        ensurePlannerTabAndAssets();
 
         document.querySelectorAll(".main-view-tab[data-view]").forEach((tab) => {
             tab.addEventListener("click", function () {

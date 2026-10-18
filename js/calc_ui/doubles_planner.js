@@ -496,7 +496,8 @@
                 targetHp.min = Math.max(0, targetHp.min - damage.max);
                 targetHp.max = Math.max(0, targetHp.max - damage.min);
                 damageEvents.push({attacker:entry.slotId,target:targetId,min:damage.min,max:damage.max,moveIndex:action.moveIndex,moveName:moveName});
-                log.push({slotId:entry.slotId, text:(entry.mon.nickname || entry.mon.name) + " → " + moveName + " → " + (targetMon.nickname || targetMon.name) + ": " + damage.min + "–" + damage.max + " HP", kind:"damage"});
+                const normalText = damage.normalCalcText ? " · " + damage.normalCalcText : "";
+                log.push({slotId:entry.slotId, text:(entry.mon.nickname || entry.mon.name) + " → " + moveName + " → " + (targetMon.nickname || targetMon.name) + ": " + damage.min + "–" + damage.max + " HP" + normalText, kind:"damage"});
             });
         });
 
@@ -550,7 +551,7 @@
         const log = projection.log.map(item => '<div class="dp-projection-log ' + attr(item.kind) + '">' + escapeHtml(item.text) + '</div>').join('');
 
         return '<div class="dp-projection"><div class="dp-projection-top"><div><strong>Projected Turn ' + projection.turn + '</strong><div class="dp-projection-order">' + order + '</div></div>' +
-            '<div class="dp-card-actions"><button type="button" data-dp-action="apply-min-rolls">Apply min damage</button><button type="button" data-dp-action="apply-max-rolls">Apply max damage</button><button type="button" data-dp-action="reset-turn">Reset</button></div></div>' +
+            '<div class="dp-card-actions"><button type="button" data-dp-action="apply-min-rolls">Apply low roll</button><button type="button" data-dp-action="apply-max-rolls">Apply high roll</button><button type="button" data-dp-action="reset-turn">Reset</button></div></div>' +
             '<div class="dp-projection-hps">' + hpRows + '</div><div class="dp-projection-log-list">' + log + '</div></div>';
     }
 
@@ -774,15 +775,27 @@
 
             const damageGen = window.settings && Number(window.settings.damageGen) || state.game.generation || 5;
             const field = plannerField(attackerEntry.slotId);
+            const currentHpPercent = safeNumber(defenderEntry.slot && defenderEntry.slot.hpPercent, 100, 0, 100);
+            if (typeof defender.maxHP === "function") {
+                defender.originalCurHP = Math.max(0, Math.ceil(defender.maxHP() * currentHpPercent / 100));
+            }
             const result = window.calc.calculate(damageGen, attacker, defender, move, field);
             const range = result && typeof result.range === "function" ? result.range() : null;
             if (!range || !Number.isFinite(Number(range[0])) || !Number.isFinite(Number(range[1]))) return null;
+            let normalCalcText = "";
+            try {
+                if (result && typeof result.moveDesc === "function") {
+                    normalCalcText = result.moveDesc(typeof window.notation !== "undefined" ? window.notation : "%");
+                }
+            } catch (_) {}
             return {
                 min: Number(range[0]),
                 max: Number(range[1]),
                 defenderHp: defender.maxHP(),
+                defenderCurrentHp: Number(defender.originalCurHP) || defender.maxHP(),
                 move: move,
-                spread: moveIsSpread(move)
+                spread: moveIsSpread(move),
+                normalCalcText: normalCalcText
             };
         } catch (error) {
             console.warn("Planner damage calculation failed", error);
@@ -793,6 +806,7 @@
     function formatDamageCell(result) {
         if (!result) return "—";
         if (result.blocked) return result.blocked;
+        if (result.normalCalcText) return result.normalCalcText + (result.spread ? " · spread" : "");
         const minPct = result.defenderHp ? (result.min * 100 / result.defenderHp) : 0;
         const maxPct = result.defenderHp ? (result.max * 100 / result.defenderHp) : 0;
         return result.min + "–" + result.max + " (" + minPct.toFixed(1) + "–" + maxPct.toFixed(1) + "%)" + (result.spread ? " spread" : "");

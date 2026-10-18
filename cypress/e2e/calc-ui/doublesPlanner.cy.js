@@ -67,6 +67,21 @@ describe('Team and doubles planner', () => {
     cy.get('.dp-damage-cell strong').first().invoke('text').should('match', /\d+.*\d+.*%/)
   })
 
+  it('projects a turn and can reset the turn state', () => {
+    cy.contains('button', '+ Pokémon').click()
+    cy.contains('button', '+ Battle').click()
+
+    cy.get('[data-slot-id="player-left"] [data-slot-field="monId"]').select(1)
+    cy.get('[data-action-slot="player-left"] [data-turn-action-field="action"]').select('Protect / Detect')
+    cy.contains('button', 'Project turn').click()
+    cy.contains('Projected Turn 1').should('be.visible')
+    cy.contains('uses Protect / Detect').should('be.visible')
+
+    cy.contains('button', 'Reset turn').first().click()
+    cy.get('.dp-projection').should('not.exist')
+    cy.get('[data-action-slot="player-left"] [data-turn-action-field="action"]').should('have.value', 'none')
+  })
+
   it('exports planner state as portable JSON', () => {
     cy.contains('button', '+ Pokémon').click()
     cy.window().then((win) => {
